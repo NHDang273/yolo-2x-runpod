@@ -1,46 +1,61 @@
 from fastapi import FastAPI, File, UploadFile
 from ultralytics import YOLO
 from PIL import Image
-import cv2, numpy as np, io, os, torch
+import cv2, numpy as np, io, torch
 
 app = FastAPI()
 
-# Danh sách 2 model YOLO
-MODELS = [
-    "yolov8n.pt",   # GPU 0
-    "yolov8s.pt"    # GPU 1
-]
+# Chỉ load 1 model tốt nhất (cho nhanh) - worker nào cũng giống nhau
+MODEL_WEIGHT = "yolov8n.pt"  # Hoặc yolov8s.pt, yolov8m.pt tùy accuracy
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Load models vào từng GPU
-models = []
-for i, weight in enumerate(MODELS):
-    device = f"cuda:{i}"
-    print(f"Loading {weight} → {device}")
-    model = YOLO(weight)  # Tự tải nếu file chưa có, hoặc load từ local
-    model.to(device)
-    models.append(model)
+print(f"🚀 Loading {MODEL_WEIGHT} on {device}")
+model = YOLO(MODEL_WEIGHT)
+model.to(device)
+print("✅ Model ready!")
 
 @app.post("/infer")
 async def infer(file: UploadFile = File(...)):
-    contents = await file.read()
-    img = Image.open(io.BytesIO(contents)).convert("RGB")
-    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    """
+    Inference endpoint - mỗi worker xử lý độc lập
+    """
+    try:
+        # Read image
+        contents = await file.read()
+        img = Image.open(io.BytesIO(contents)).convert("RGB")
+        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        
+        # Run inference
+        result = model(img_cv, verbose=False)[0]
+        
+        # Parse results
+        boxes = result.boxes.data.cpu().numpy().tolist()
+        names = [result.names[int(cls)] for cls in result.boxes.cls.cpu().numpy()]
+        
+        return {
+            "success": True,
+            "model": MODEL_WEIGHT,
+            "device": str(device),
+            "boxes": boxes,
+            "names": names,
+            "inference_ms": round(result.speed['inference'], 2),
+            "count": len(boxes)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
-    # Load balance bằng hash
-    gpu_id = hash(contents) % len(models)
-    result = models[gpu_id](img_cv, verbose=False)[0]
-
-    boxes = result.boxes.data.cpu().numpy().tolist()
-    names = [result.names[int(cls)] for cls in result.boxes.cls.cpu().numpy()]
-
+@app.get("/health")
+async def health():
+    """Health check cho RunPod"""
     return {
-        "gpu_used": gpu_id,
-        "model": MODELS[gpu_id],
-        "boxes": boxes,
-        "names": names,
-        "inference_ms": round(result.speed['inference'], 2)
+        "status": "healthy",
+        "model": MODEL_WEIGHT,
+        "device": str(device)
     }
 
 @app.get("/")
 async def root():
-    return {"message": "2x YOLO ready! POST image to /infer"}
+    return {"message": "YOLO inference ready!", "endpoint": "/infer"}
