@@ -2,11 +2,13 @@ from fastapi import FastAPI, File, UploadFile
 from ultralytics import YOLO
 from PIL import Image
 import cv2, numpy as np, io, torch
+import os
+import uvicorn
 
 app = FastAPI()
 
-# Chỉ load 1 model tốt nhất (cho nhanh) - worker nào cũng giống nhau
-MODEL_WEIGHT = "yolov8n.pt"  # Hoặc yolov8s.pt, yolov8m.pt tùy accuracy
+# Load model 1 lần
+MODEL_WEIGHT = "yolov8n.pt"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 print(f"🚀 Loading {MODEL_WEIGHT} on {device}")
@@ -14,11 +16,18 @@ model = YOLO(MODEL_WEIGHT)
 model.to(device)
 print("✅ Model ready!")
 
+@app.get("/ping")
+async def ping():
+    """Health check endpoint - REQUIRED by RunPod Load Balancing"""
+    return {"status": "healthy"}
+
+@app.get("/")
+async def root():
+    return {"message": "YOLO inference ready!", "endpoint": "/infer"}
+
 @app.post("/infer")
 async def infer(file: UploadFile = File(...)):
-    """
-    Inference endpoint - mỗi worker xử lý độc lập
-    """
+    """Inference endpoint"""
     try:
         # Read image
         contents = await file.read()
@@ -47,15 +56,13 @@ async def infer(file: UploadFile = File(...)):
             "error": str(e)
         }
 
-@app.get("/health")
-async def health():
-    """Health check cho RunPod"""
-    return {
-        "status": "healthy",
-        "model": MODEL_WEIGHT,
-        "device": str(device)
-    }
-
-@app.get("/")
-async def root():
-    return {"message": "YOLO inference ready!", "endpoint": "/infer"}
+if __name__ == "__main__":
+    # Lấy port từ environment variable (RunPod Load Balancing requirement)
+    port = int(os.getenv("PORT", 8000))
+    
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=port,
+        workers=1
+    )
